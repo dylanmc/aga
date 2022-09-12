@@ -5,7 +5,17 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Sequence,
+    TypeVar,
+    overload,
+)
 from unittest import TestCase, TestSuite
 from unittest.mock import patch
 
@@ -15,6 +25,15 @@ from .score import Prize, ScoredPrize, ScoreInfo, compute_scores
 from .util import text_diff
 
 Output = TypeVar("Output")
+
+AGA_RESERVED_KEYWORDS = {
+    "aga_expect",
+    "aga_expect_stdout",
+    "aga_hidden",
+    "aga_name",
+    "aga_weight",
+    "aga_value",
+}
 
 
 @dataclass(frozen=True)
@@ -98,6 +117,18 @@ class AgaTestSuite(TestSuite):
         self.config = config
 
 
+def generate_custom_input(input_list: Iterable[str]) -> Callable[[Any], str]:
+    """Generate a custom input function for a test case."""
+    _iterator = iter(input_list)
+
+    def _custom_input(*args: Any) -> str:
+        print(*args)
+        return next(_iterator)
+
+    return _custom_input
+
+
+# pylint: disable=too-many-instance-attributes
 class _TestInputs(TestCase, Generic[Output]):
     """A single set of test inputs for a problem.
 
@@ -112,6 +143,7 @@ class _TestInputs(TestCase, Generic[Output]):
         self,
         *args: Any,
         aga_expect: Optional[Output],
+        aga_expect_stdout: Optional[str | Sequence[str]],
         aga_hidden: bool,
         aga_name: Optional[str],
         aga_weight: int,
@@ -124,6 +156,7 @@ class _TestInputs(TestCase, Generic[Output]):
         self._hidden = aga_hidden
         self._mock_input = aga_mock_input
         self._expect = aga_expect
+        self._expect_stdout = aga_expect_stdout
         self.score_info = ScoreInfo(aga_weight, aga_value)
 
         self._args = args
@@ -134,7 +167,9 @@ class _TestInputs(TestCase, Generic[Output]):
         # deepcopy in case the student submission mutates arguments; we don't want it to
         # mess with our copy of the arguments
         if self._mock_input:
-            with patch("builtins.input", side_effect=[*deepcopy(self._args)]) as _:
+            with patch(
+                "builtins.input", generate_custom_input(deepcopy(self._args))
+            ) as _:
                 return func()
         else:
             return func(*deepcopy(self._args), **deepcopy(self._kwargs))
@@ -184,7 +219,13 @@ class _TestInputs(TestCase, Generic[Output]):
             diff_explanation = ""
             diff = ""
 
-        self.assertEqual(
+        if isinstance(expected, float) and isinstance(got, (float, int)):
+            comparator = self.assertAlmostEqual  # type: ignore
+
+        else:
+            comparator = self.assertEqual  # type: ignore
+
+        comparator(  # type: ignore
             got,
             expected,
             msg=msg_format.format(
@@ -243,8 +284,20 @@ class _TestInputs(TestCase, Generic[Output]):
 
     def check_one(self, golden: Callable[..., Output]) -> None:
         """Check that the golden solution is correct."""
-        if self._expect is not None:
-            self.assertEqual(self._eval(golden), self._expect)
+        if self._expect is not None or self._expect_stdout is not None:
+            golden_stdout, golden_output = self._eval(
+                with_captured_stdout(golden)
+            )  # type: str, Output
+            if self._expect is not None:
+                self.assertEqual(golden_output, self._expect)
+
+            if self._expect_stdout is not None:
+                if isinstance(self._expect_stdout, str):
+                    self.assertEqual(golden_stdout, self._expect_stdout)
+                elif isinstance(self._expect_stdout, Sequence):
+                    self.assertEqual(
+                        golden_stdout.splitlines(), list(self._expect_stdout)
+                    )
 
 
 class _TestInputGroup(Generic[Output]):
@@ -322,6 +375,7 @@ class Problem(Generic[Output]):
         aga_name: Optional[str] = None,
         aga_weight: int = 1,
         aga_value: float = 0.0,
+        aga_expect_stdout: Optional[str | Sequence[str]] = None,
         **kwargs: Any,
     ) -> None:
         """Add a test case to the current group.
@@ -332,6 +386,7 @@ class Problem(Generic[Output]):
         case: _TestInputs[Output] = _TestInputs(
             *args,
             aga_expect=aga_expect,
+            aga_expect_stdout=aga_expect_stdout,
             aga_hidden=aga_hidden,
             aga_name=aga_name,
             aga_weight=aga_weight,
@@ -443,6 +498,10 @@ class Problem(Generic[Output]):
         else:
             return self._groups
 
+    def __call__(self, *args, **kwargs) -> Output:  # type: ignore
+        """Enable the ability to call the golden solution as if the problem were it."""
+        return self._golden(*args, **kwargs)
+
 
 def problem(
     name: Optional[str] = None,
@@ -507,17 +566,32 @@ def problem(
 
 def _check_reserved_keyword(kwd: str) -> None:
     """Raise an error if `kwd` is reserved."""
-    if kwd.startswith("aga_") and kwd not in (
-        "aga_expect",
-        "aga_hidden",
-        "aga_name",
-        "aga_weight",
-        "aga_value",
-    ):
+    if kwd.startswith("aga_") and kwd not in AGA_RESERVED_KEYWORDS:
         raise ValueError(
             f'invalid keyword arg "{kwd}" to `test_case`: all keyword args '
             "beginning `aga_` are reserved"
         )
+
+
+@overload
+def test_case(
+    *args: Any,
+    aga_expect: Optional[Any] = ...,
+    aga_hidden: bool = ...,
+    aga_name: Optional[str] = ...,
+    aga_weight: int = ...,
+    aga_value: float = ...,
+    aga_expect_stdout: Optional[str | Sequence[str]] = ...,
+    **kwargs: Any,
+) -> Callable[[Problem[Output]], Problem[Output]]:
+    ...
+
+
+@overload
+def test_case(
+    *args: Any, **kwargs: Any
+) -> Callable[[Problem[Output]], Problem[Output]]:
+    ...
 
 
 def test_case(
@@ -535,6 +609,14 @@ def test_case(
         the "golden solution" to the problem. If aga_expect is specified, the inputs
         will double as a test _of_ the golden solution; to successfully produce the
         problem grader, the golden solution must return aga_expect from the given input.
+    aga_expect_stdout : Optional[str | Sequence[str]]
+        If aga_expect_stdout is specified, the golden solution's stdout will be checked
+        against the given value(s). If aga_expect_stdout is a string, it will be
+        compared against the golden solution's stdout. If aga_expect_stdout is a
+        sequence of strings, the golden solution's stdout will be split on newlines
+        (with '\n' removed) and the resulting list will be compared against the given
+        sequence. If aga_expect_stdout is None, the golden solution's stdout will not
+        be checked.
     aga_hidden : bool
         If True, hide the problem from students on supported frontends.
     aga_name : Optional[str]
@@ -543,7 +625,7 @@ def test_case(
     aga_weight : int
         The test case's relative weight to the group's score. See :ref:`Determining
         Score` for details.
-    aga_value : int
+    aga_value : float
         The test case's absolute score. See :ref:`Determining Score` for details.
     kwargs :
         Keyword arguments to be passed to the functions under test. Any keyword starting
@@ -567,12 +649,37 @@ def test_case(
     return outer
 
 
+@overload
 def test_cases(
     *args: Iterable[Any],
     aga_product: bool = True,
+    **kwargs: Iterable[Any] | Any,
+) -> Callable[[Problem[Output]], Problem[Output]]:
+    ...
+
+
+@overload
+def test_cases(
+    *args: Iterable[Any],
+    aga_expect: Iterable[Optional[Any]] | Optional[Any] = ...,
+    aga_hidden: Iterable[bool] | bool = ...,
+    aga_name: Iterable[Optional[str]] | Optional[str] = ...,
+    aga_weight: Iterable[int] | int = ...,
+    aga_value: Iterable[float] | float = ...,
+    aga_expect_stdout: Iterable[Optional[str | Sequence[str]]]
+    | Optional[str | Sequence[str]] = ...,
+    aga_product: bool = True,
     **kwargs: Iterable[Any],
 ) -> Callable[[Problem[Output]], Problem[Output]]:
-    r"""Generate many test cases programatically, from generators of inputs.
+    ...
+
+
+def test_cases(
+    *args: Iterable[Any],
+    aga_product: bool = True,
+    **kwargs: Any,
+) -> Callable[[Problem[Output]], Problem[Output]]:
+    r"""Generate many test cases programmatically, from generators of inputs.
 
     Parameters
     ----------
@@ -582,11 +689,12 @@ def test_cases(
         Whether to take a cartesian product of the generators (creating one test case
         for each set of inputs in the product), or to zip them (iterate through each
         generator in sequence). Default `True`.
-    aga_*
-        Other `aga_` keywords have their meaning inherited from `test_case`, and are
-        applied to each test case generated by this function. Aga_expect is not
-        supported.
     kwargs :
+        `aga_` keywords have their meaning inherited from `test_case`, and are
+        applied to each test case generated by this function. Singleton value and
+        Sequence values are supported, i.e., `aga_hidden=True` and
+        `aga_expect = [1, 2, 3]` are both valid. When passing in a Sequence object,
+        the length of the sequence must match the length of the test cases.
         Generators for keyword arguments to be passed to the functions under test. Any
         keyword starting with aga\_ is reserved.
 
@@ -597,14 +705,75 @@ def test_cases(
     """
 
     def outer(prob: Problem[Output]) -> Problem[Output]:
+        # ok so if the combinator is product
+        # we are taking the cartesian product for all args and kwargs
+        # and if the combinator is zip,
+        # we are zipping all the args and kwargs, if there are any
         combinator = product if aga_product else zip
 
-        combined_args = combinator(*args)
-        combined_kwargs = combinator(*kwargs.values())
+        combined_args = list(combinator(*args))
 
-        for curr_args, curr_kwargs in combinator(combined_args, combined_kwargs):
+        # pop aga keywords out
+        aga_kwargs_dict = {
+            kwd: kwargs.pop(kwd) for kwd in AGA_RESERVED_KEYWORDS if kwd in kwargs
+        }
+
+        combined_kwargs = list(combinator(*kwargs.values()))
+
+        # ======= validation checks =======
+        if combinator is zip:
+            # create empty args for zip if there are no args
+            if combined_args and combined_kwargs:
+                if len(combined_args) != len(combined_kwargs):
+                    raise ValueError(
+                        'length of "args" and "kwargs" must match in zip mode'
+                    )
+            elif combined_args:
+                combined_kwargs = [()] * len(combined_args)
+            elif combined_kwargs:
+                combined_args = [()] * len(combined_kwargs)
+
+        all_args_and_kwargs = list(combinator(combined_args, combined_kwargs))
+
+        # process aga input type
+        for aga_kwarg_key, aga_kwarg_value in aga_kwargs_dict.items():
+            if isinstance(aga_kwarg_value, Iterable) and not isinstance(
+                aga_kwarg_value, str
+            ):
+                aga_kwargs_dict[aga_kwarg_key] = list(aga_kwarg_value)
+            else:
+                aga_kwargs_dict[aga_kwarg_key] = [aga_kwarg_value] * len(
+                    all_args_and_kwargs
+                )
+
+        # validate aga input type
+        if not all(
+            len(aga_kwarg_value) == len(all_args_and_kwargs)
+            for aga_kwarg_value in aga_kwargs_dict.values()
+        ):
+            # the length of the kwargs should be equal to the number of test cases
+            # i.e. the length of the combined args
+            raise ValueError(
+                f"all aga_ keyword args must have the same length as the test cases, "
+                f"which is {len(combined_args)}"
+            )
+
+        # the aga kwargs list we want
+        aga_kwargs_list: List[Dict[str, Any]] = [
+            dict(zip(aga_kwargs_dict.keys(), aga_kwarg_value))
+            for aga_kwarg_value in zip(*aga_kwargs_dict.values())
+        ]
+
+        if not aga_kwargs_list:
+            # generate default aga kwargs dict if there are no aga kwargs
+            aga_kwargs_list = [{} for _ in all_args_and_kwargs]
+
+        # ======= zipping all the args together =======
+        total_args = list(zip(all_args_and_kwargs, aga_kwargs_list))
+
+        for (curr_args, curr_kwargs), aga_kwargs in total_args:
             # we have to reassemble a kwargs dictionary that actually has keys
-            final_kwargs = dict(zip(kwargs.keys(), curr_kwargs))
+            final_kwargs = dict(zip(kwargs.keys(), curr_kwargs), **aga_kwargs)
 
             # i think we have to enumerate all of the arguments to test_case by
             # hand; we can't capture them separately from the test case kwargs

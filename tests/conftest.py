@@ -6,14 +6,15 @@ from importlib.resources import files
 from os.path import join as pathjoin
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Iterable, Iterator, List
+from typing import Generator, Iterable, Iterator, List
 
 import pytest
 from _pytest.config import Config
 from pytest_lazyfixture import lazy_fixture  # type: ignore
 
+import aga
 from aga import group, problem, test_case, test_cases
-from aga.config import AgaConfig, load_config_from_path
+from aga.config import INJECTION_MODULE_FLAG, AgaConfig, load_config_from_path
 from aga.core import Problem, SubmissionMetadata
 from aga.runner import TcOutput
 from aga.score import correct_and_on_time, prize
@@ -94,6 +95,18 @@ speaker = input("Speaker? ")
 print(f"Hello, {speaker}.")
 print(f"I'm {listener}.")
 """,
+    "temp_right": """
+def temperature(f: float) -> float:
+    return (f - 32) * 5.0 / 9.0
+""",
+    "temp_wrong": """
+def temperature(f: float) -> float:
+    return f
+""",
+    "temp_float_issue": """
+def temperature(f: float) -> float:
+    return (f - 32) * (5.0 / 9.0)
+""",
 }
 
 
@@ -169,6 +182,7 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]) -> N
 @pytest.fixture(
     params=[  # type: ignore
         lazy_fixture("square"),
+        lazy_fixture("temp"),
         lazy_fixture("square_custom_name"),
         lazy_fixture("times"),
         lazy_fixture("diff"),
@@ -180,11 +194,18 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]) -> N
         lazy_fixture("square_grouped"),
         lazy_fixture("square_generated_cases"),
         lazy_fixture("diff_generated"),
+        lazy_fixture("pos_zip"),
+        lazy_fixture("pos_zip_with_singleton_aga_args"),
+        lazy_fixture("aga_args_in_product"),
+        lazy_fixture("aga_args_with_kwargs_in_product"),
+        lazy_fixture("aga_args_singleton"),
+        lazy_fixture("aga_args_with_kwargs_in_product_singleton"),
         lazy_fixture("pos_and_kwd_generated"),
         lazy_fixture("pos_and_kwd_zip"),
         lazy_fixture("pos_and_kwd_generator_function"),
         lazy_fixture("hello_world"),
         lazy_fixture("hello_name"),
+        lazy_fixture("aga_expect_stdout"),
     ]
 )
 def valid_problem(request):
@@ -205,6 +226,21 @@ def fixture_square() -> Problem[int]:
         return x * x
 
     return square
+
+
+@pytest.fixture(name="temp")
+def fixture_temp() -> Problem[float]:
+    """Generate a problem which tests a temp function which returns float."""
+
+    @test_case(4.0)
+    @test_case(2.8)
+    @test_case(104.9, aga_expect=40.5)
+    @problem()
+    def temperature(temp: float) -> float:
+        """Divide a by b."""
+        return (temp - 32.0) * 5.0 / 9.0
+
+    return temperature
 
 
 @pytest.fixture(name="square_custom_name")
@@ -426,6 +462,84 @@ def fixture_diff_generator() -> Problem[int]:
     return difference
 
 
+@pytest.fixture(name="pos_zip")
+def fixture_pos_zip() -> Problem[int]:
+    """Generate a problem which tests zip combinator."""
+
+    @test_cases([-1, 1], [1, 3], aga_product=False, aga_hidden=[True] * 2)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
+@pytest.fixture(name="pos_zip_with_singleton_aga_args")
+def fixture_pos_zip_with_singleton_aga_args() -> Problem[int]:
+    """Generate a problem which tests zip combinator and singleton aga_ kwargs input."""
+
+    @test_cases([-1, 1], [1, 3], aga_product=False, aga_hidden=True)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
+@pytest.fixture(name="aga_args_in_product")
+def fixture_aga_args_in_product() -> Problem[int]:
+    """Generate a problem which tests product combinator."""
+
+    @test_cases(range(-1, 2), range(1, 3), aga_hidden=[True] * 6, aga_product=True)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
+@pytest.fixture(name="aga_args_with_kwargs_in_product")
+def fixture_aga_args_with_kwargs_in_product() -> Problem[int]:
+    """Generate a problem which tests product combinator with mixed args and kwargs."""
+
+    @test_cases(range(-1, 2), y=range(1, 3), aga_hidden=[True] * 6, aga_product=True)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
+@pytest.fixture(name="aga_args_singleton")
+def fixture_aga_args_singleton() -> Problem[int]:
+    """Generate a problem which tests product combinator with singleton aga_ kwargs."""
+
+    @test_cases(range(-1, 2), range(1, 3), aga_hidden=True, aga_product=True)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
+@pytest.fixture(name="aga_args_with_kwargs_in_product_singleton")
+def fixture_aga_args_with_kwargs_in_product_singleton() -> Problem[int]:
+    """Generate a problem which tests product with mixed args and kwargs."""
+
+    @test_cases(range(-1, 2), y=range(1, 3), aga_hidden=True, aga_product=True)
+    @problem()
+    def difference(x: int, y: int) -> int:
+        """Compute x - y."""
+        return x - y
+
+    return difference
+
+
 @pytest.fixture(name="pos_and_kwd_generated")
 def fixture_pos_and_kwd_generated() -> Problem[int]:
     """Generate a problem which tests a diff function.
@@ -519,7 +633,7 @@ def fixture_hello_name() -> Problem[None]:
         listener = input("Listener? ")
         print(f"Hello, {listener}.")
 
-        speaker = input("Speaker ?")
+        speaker = input("Speaker? ")
         print(f"I'm {speaker}.")
 
     return hello_name
@@ -599,6 +713,49 @@ def fixture_square_custom_prize() -> Problem[int]:
     return square
 
 
+@pytest.fixture(name="aga_expect_stdout")
+def fixture_aga_expect_stdout() -> Problem[None]:
+    """Generate a problem which tests stdout."""
+
+    @test_case(aga_expect_stdout="Hello, world!\n")
+    @test_case(aga_expect_stdout=["Hello, world!"])
+    @problem(script=True)
+    def hello_world() -> None:
+        """Print 'Hello, world!'."""
+        print("Hello, world!")
+
+    return hello_world
+
+
+@pytest.fixture(name="script_aga_expect_stdout_with_input")
+def fixture_script_aga_expect_stdout_with_input() -> Problem[None]:
+    """Generate a problem which tests stdout with input."""
+
+    @test_case("Bob", aga_expect_stdout=["Hi? ", "Hello, this is Bob."])
+    @test_case("Alice", aga_expect_stdout="Hi? \nHello, this is Alice.\n")
+    @problem(script=True)
+    def hello_world() -> None:
+        """Print 'Hello, world!'."""
+        listener = input("Hi? ")
+        print(f"Hello, this is {listener}.")
+
+    return hello_world
+
+
+@pytest.fixture(name="function_aga_expect_stdout_with_input")
+def fixture_function_aga_expect_stdout_with_input() -> Problem[None]:
+    """Generate a problem which tests stdout with input."""
+
+    @test_case("Bob", aga_expect_stdout=["Hello, this is Bob."])
+    @test_case("Alice", aga_expect_stdout="Hello, this is Alice.\n")
+    @problem()
+    def hello_world(listener: str) -> None:
+        """Print 'Hello, world!'."""
+        print(f"Hello, this is {listener}.")
+
+    return hello_world
+
+
 @pytest.fixture(name="example_config_file")
 def fixture_example_config_file(
     tmp_path: Path,
@@ -651,3 +808,15 @@ def fixture_metadata_previous_submissions() -> SubmissionMetadata:
         time_since_due=timedelta(),
         previous_submissions=3,
     )
+
+
+@pytest.fixture(name="injection_tear_down")
+def fixture_injection_tear_down() -> Generator[None, None, None]:
+    """Tear down the injection modules."""
+    yield
+
+    for mod_name, mod in list(sys.modules.items()):
+        if mod_name.startswith("aga") and getattr(mod, INJECTION_MODULE_FLAG, None):
+            # ehh
+            del sys.modules[mod_name]
+            delattr(aga, mod_name.split(".")[-1])

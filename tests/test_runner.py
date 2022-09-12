@@ -208,10 +208,12 @@ HELLO_NAME_FAILURE_OUT_ME = """Your submission printed something different from 
 
 Here's a detailed look at the difference between the strings. Lines starting with `-` are what we got from you, lines starting with `+` are what we expected, and `_`s in lines starting with `?` denote characters that are different. Be wary for spaces, which don't show up well in this format.
 
+  Listener? 
++ Hello, world.
+  Speaker? 
++ I'm me.
 - Hello, me.
 - I'm world.
-+ Hello, world.
-+ I'm me.
 """
 
 # flake8: noqa
@@ -220,10 +222,12 @@ HELLO_NAME_FAILURE_OUT_ALICE = """Your submission printed something different fr
 
 Here's a detailed look at the difference between the strings. Lines starting with `-` are what we got from you, lines starting with `+` are what we expected, and `_`s in lines starting with `?` denote characters that are different. Be wary for spaces, which don't show up well in this format.
 
+  Listener? 
++ Hello, Alice.
+  Speaker? 
++ I'm Bob.
 - Hello, Bob.
 - I'm Alice.
-+ Hello, Alice.
-+ I'm Bob.
 """
 
 
@@ -404,3 +408,27 @@ def test_square_custom_prize_score(
     )
     # test passes, which is 10 points; prize should be 8/10
     assert output.score == 18.0
+
+
+def test_temp_right(
+    temp: Problem[float], source_temp_right: str, metadata: SubmissionMetadata
+) -> None:
+    """Test that temp_right counts as corrrect."""
+    output = load_and_run(temp, source_temp_right, metadata)
+    assert output.score == 20.0
+
+
+def test_temp_float_issue(
+    temp: Problem[float], source_temp_float_issue: str, metadata: SubmissionMetadata
+) -> None:
+    """Test that temp_float_issue counts as corrrect."""
+    output = load_and_run(temp, source_temp_float_issue, metadata)
+    assert output.score == 20.0
+
+
+def test_temp_wrong(
+    temp: Problem[float], source_temp_wrong: str, metadata: SubmissionMetadata
+) -> None:
+    """Test that temp_wrong is wrong."""
+    output = load_and_run(temp, source_temp_wrong, metadata)
+    assert output.score == 0.0
